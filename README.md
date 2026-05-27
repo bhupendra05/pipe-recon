@@ -233,4 +233,4 @@ sys.exit(0 if result.is_clean else 1)
 
 ## License
 
-MIT — [Bhupendra Gurjar](https://github.com/bhupendra05)
+MIT — [Bhupendra Tale](https://github.com/bhupendra05)

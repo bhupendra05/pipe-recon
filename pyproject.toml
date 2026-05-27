@@ -9,7 +9,7 @@ description = "Enterprise pipeline reconciliation driven by functional/technical
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Bhupendra Gurjar", email = "bgurjar05.bg@gmail.com" }]
+authors = [{ name = "Bhupendra Tale", email = "bgurjar05.bg@gmail.com" }]
 keywords = [
     "data-migration", "etl", "reconciliation", "pipeline",
     "data-quality", "mapping-document", "oracle", "sqlserver",
