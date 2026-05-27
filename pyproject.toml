@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipe-recon"
+version = "0.1.0"
+description = "Enterprise pipeline reconciliation driven by functional/technical mapping documents. Handles Oracle, SQL Server, PostgreSQL, MySQL. INBOUND + OUTBOUND. Run-scoped."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Bhupendra Gurjar", email = "bgurjar05.bg@gmail.com" }]
+keywords = [
+    "data-migration", "etl", "reconciliation", "pipeline",
+    "data-quality", "mapping-document", "oracle", "sqlserver",
+    "inbound", "outbound", "data-engineering", "enterprise"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+excel    = ["openpyxl>=3.0"]
+postgres = ["psycopg2-binary>=2.9"]
+mysql    = ["mysql-connector-python>=8.0"]
+oracle   = ["cx_Oracle>=8.0"]
+sqlserver = ["pyodbc>=4.0"]
+yaml     = ["pyyaml>=6.0"]
+dev      = ["pytest>=7.0"]
+all      = [
+    "openpyxl>=3.0",
+    "psycopg2-binary>=2.9",
+    "mysql-connector-python>=8.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+pipe-recon = "reconpilot.cli:main"
+
+[project.urls]
+Homepage   = "https://github.com/bhupendra05/pipe-recon"
+Repository = "https://github.com/bhupendra05/pipe-recon"
+Issues     = "https://github.com/bhupendra05/pipe-recon/issues"
+
+[tool.setuptools.packages.find]
+include = ["reconpilot*"]
