@@ -234,10 +234,27 @@ class TestReconcileFromMapping:
         src.close(); tgt.close()
 
     def test_trim_transform(self, tmp_path):
+        """Trim is applied to source only — target must already be trimmed for a clean match."""
         doc, src, tgt = self._setup(tmp_path)
+        # TARGET_ROWS already has trimmed names ("Alice", "Bob", "Carol")
+        # SOURCE_ROWS has padded names ("  Alice  ", "  Bob  ", "  Carol  ")
+        # trim(source) == target → should match cleanly
         result = reconcile_from_mapping(doc, src, tgt, "CUSTOMER")
         name_result = next(f for f in result.field_results if f.target_column == "first_name")
         assert name_result.mismatched == 0
+        src.close(); tgt.close()
+
+    def test_trim_detects_untrimmed_target(self, tmp_path):
+        """If target still has spaces (ETL forgot to trim), it should be flagged as mismatch."""
+        doc, src, tgt = self._setup(tmp_path, tgt_rows=[
+            {"customer_id": 1, "first_name": "  Alice  ", "email": "alice@example.com", "status": "Active"},
+            {"customer_id": 2, "first_name": "  Bob  ",   "email": "bob@example.com",   "status": "Inactive"},
+            {"customer_id": 3, "first_name": "  Carol  ", "email": "carol@example.com", "status": "Active"},
+        ])
+        result = reconcile_from_mapping(doc, src, tgt, "CUSTOMER")
+        name_result = next(f for f in result.field_results if f.target_column == "first_name")
+        # Source "  Alice  " trimmed = "Alice", target "  Alice  " ≠ "Alice" → mismatch
+        assert name_result.mismatched == 3
         src.close(); tgt.close()
 
     def test_outbound_direction(self, tmp_path):

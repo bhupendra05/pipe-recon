@@ -1,0 +1,11 @@
+source_table,source_column,target_table,target_column,transformation,is_key,nullable,data_type,notes
+SUPPLIER_MASTER,SUPP_ID,supplier_master,supplier_id,direct,yes,no,INTEGER,Primary key
+SUPPLIER_MASTER,SUPP_NM,supplier_master,supplier_name,trim,no,no,VARCHAR,Remove leading/trailing spaces
+SUPPLIER_MASTER,ADDR_LINE1,supplier_master,address,trim,no,yes,VARCHAR,
+SUPPLIER_MASTER,CITY_NM,supplier_master,city,trim,no,yes,VARCHAR,
+SUPPLIER_MASTER,STATE_NM,supplier_master,state,trim,no,yes,VARCHAR,
+SUPPLIER_MASTER,CNTRY_CD,supplier_master,country,"lookup: A=Australia|I=India|U=USA|G=Germany|F=France",no,no,VARCHAR,Code to full country name
+SUPPLIER_MASTER,STAT_CD,supplier_master,status,"lookup: A=Active|I=Inactive|S=Suspended",no,no,VARCHAR,Status code to label
+SUPPLIER_MASTER,CONT_EMAIL,supplier_master,contact_email,lower,no,yes,VARCHAR,Normalize to lowercase
+SUPPLIER_MASTER,CONT_PHONE,supplier_master,contact_phone,direct,no,yes,VARCHAR,
+SUPPLIER_MASTER,TAX_ID,supplier_master,tax_id,direct,no,yes,VARCHAR,GST/TIN number

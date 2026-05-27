@@ -8,6 +8,7 @@ Supports:
 """
 
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -29,6 +30,17 @@ class FieldResult:
 
 
 @dataclass
+class RowDiff:
+    """Row-level comparison result — powers the side-by-side detail table in the HTML report."""
+    key: str
+    status: str          # "missing_in_target" | "extra_in_target" | "mismatch"
+    source_row: dict     # {column: value} from source (empty dict if extra_in_target)
+    target_row: dict     # {column: value} from target (empty dict if missing_in_target)
+    mismatched_fields: list[str]   # field names that differ (only for "mismatch" status)
+    comment: str         # human-readable explanation of the discrepancy
+
+
+@dataclass
 class RunReconcileReport:
     pipeline_name: str
     direction: str           # INBOUND | OUTBOUND
@@ -43,6 +55,7 @@ class RunReconcileReport:
     missing_in_target: list
     extra_in_target: list
     field_results: list[FieldResult]
+    row_diffs: list[RowDiff] = field(default_factory=list)  # full side-by-side diff rows
 
     warnings: list[str] = field(default_factory=list)
     generated_sql: list[str] = field(default_factory=list)
@@ -60,6 +73,20 @@ class RunReconcileReport:
     def total_field_mismatches(self) -> int:
         return sum(f.mismatched for f in self.field_results)
 
+    @property
+    def success_count(self) -> int:
+        """Rows that matched fully (all fields clean)."""
+        return self.matched_keys - len([d for d in self.row_diffs if d.status == "mismatch"])
+
+    @property
+    def error_count(self) -> int:
+        """Total rows with any issue: missing + extra + field-mismatched."""
+        return (
+            len(self.missing_in_target)
+            + len(self.extra_in_target)
+            + len([d for d in self.row_diffs if d.status == "mismatch"])
+        )
+
     def print(self):
         status = "✅ CLEAN" if self.is_clean else "❌ ISSUES FOUND"
         arrow = "→" if self.direction == "INBOUND" else "←"
@@ -72,6 +99,8 @@ class RunReconcileReport:
         print(f"    Source rows : {self.source_count:,}")
         print(f"    Target rows : {self.target_count:,}  {'✅' if self.source_count == self.target_count else '❌ COUNT MISMATCH'}")
         print(f"    Matched keys: {self.matched_keys:,}")
+        print(f"    ✅ Success   : {self.success_count:,}")
+        print(f"    ❌ Errors    : {self.error_count:,}")
 
         if self.missing_in_target:
             print(f"\n    ❌ Missing in target: {len(self.missing_in_target):,}")
@@ -112,6 +141,8 @@ class RunReconcileReport:
             "source_count": self.source_count,
             "target_count": self.target_count,
             "matched_keys": self.matched_keys,
+            "success_count": self.success_count,
+            "error_count": self.error_count,
             "missing_in_target_count": len(self.missing_in_target),
             "extra_in_target_count": len(self.extra_in_target),
             "total_field_mismatches": self.total_field_mismatches,
@@ -130,6 +161,17 @@ class RunReconcileReport:
                 }
                 for f in self.field_results
             ],
+            "row_diffs": [
+                {
+                    "key": d.key,
+                    "status": d.status,
+                    "source_row": d.source_row,
+                    "target_row": d.target_row,
+                    "mismatched_fields": d.mismatched_fields,
+                    "comment": d.comment,
+                }
+                for d in self.row_diffs[:200]
+            ],
             "generated_sql": self.generated_sql,
             "warnings": self.warnings,
         }
@@ -146,13 +188,16 @@ def _apply_transform_check(src_val, tgt_val, transform: str) -> bool:
         return str(src_val) == str(tgt_val)
 
     if transform_lower in ("trim",):
-        return str(src_val).strip() == str(tgt_val).strip()
+        # Apply trim to SOURCE only — validates that ETL stripped spaces before loading to target
+        return str(src_val).strip() == str(tgt_val)
 
     if transform_lower in ("upper",):
-        return str(src_val).upper() == str(tgt_val).upper()
+        # Apply upper to SOURCE only — validates that ETL uppercased before loading to target
+        return str(src_val).upper() == str(tgt_val)
 
     if transform_lower in ("lower",):
-        return str(src_val).lower() == str(tgt_val).lower()
+        # Apply lower to SOURCE only — validates that ETL lowercased before loading to target
+        return str(src_val).lower() == str(tgt_val)
 
     if "date_format" in transform_lower:
         # Best effort: compare as string after stripping separators
@@ -161,11 +206,16 @@ def _apply_transform_check(src_val, tgt_val, transform: str) -> bool:
         return clean_src == clean_tgt
 
     if "lookup" in transform_lower:
-        # lookup: A=Active,I=Inactive — check the reverse mapping
+        # lookup: A=Active,I=Inactive  or  lookup: A=Active|I=Inactive
+        # Supports both comma and pipe as pair separators (pipe is CSV-safe)
         try:
             lookup_map = {}
-            _, pairs = transform.split(":", 1)
-            for pair in pairs.split(","):
+            _, pairs_str = transform.split(":", 1)
+            # Use pipe if present, otherwise fall back to comma
+            sep = "|" if "|" in pairs_str else ","
+            for pair in pairs_str.split(sep):
+                if "=" not in pair:
+                    continue
                 k, v = pair.strip().split("=", 1)
                 lookup_map[k.strip()] = v.strip()
             expected = lookup_map.get(str(src_val), str(src_val))
@@ -177,7 +227,33 @@ def _apply_transform_check(src_val, tgt_val, transform: str) -> bool:
     return str(src_val) == str(tgt_val)
 
 
-import re  # needed by _apply_transform_check
+def _build_field_comment(src_val, tgt_val, transform: str) -> str:
+    """Build a human-readable comment explaining a field mismatch."""
+    transform_lower = transform.strip().lower()
+    if "lookup" in transform_lower:
+        # Try to show what the expected mapped value should have been
+        try:
+            _, pairs_str = transform.split(":", 1)
+            sep = "|" if "|" in pairs_str else ","
+            lookup_map = {}
+            for pair in pairs_str.split(sep):
+                if "=" not in pair:
+                    continue
+                k, v = pair.strip().split("=", 1)
+                lookup_map[k.strip()] = v.strip()
+            expected = lookup_map.get(str(src_val), str(src_val))
+            return f"Lookup mismatch: source code '{src_val}' should map to '{expected}', got '{tgt_val}'"
+        except Exception:
+            return f"Lookup mismatch: source code '{src_val}' → expected mapped value, got '{tgt_val}'"
+    if transform_lower == "lower":
+        return f"Case mismatch after lowercase: source '{src_val}' → expected '{str(src_val).lower()}', got '{tgt_val}'"
+    if transform_lower == "upper":
+        return f"Case mismatch after uppercase: source '{src_val}' → expected '{str(src_val).upper()}', got '{tgt_val}'"
+    if transform_lower == "trim":
+        return f"Whitespace mismatch after trim: source '{src_val}' → expected '{str(src_val).strip()}', got '{tgt_val}'"
+    if "date_format" in transform_lower:
+        return f"Date format mismatch: source '{src_val}' vs target '{tgt_val}'"
+    return f"Value mismatch: source '{src_val}' vs target '{tgt_val}'"
 
 
 def reconcile_from_mapping(
@@ -205,20 +281,20 @@ def reconcile_from_mapping(
         sample:        If set, only sample N rows.
 
     Returns:
-        RunReconcileReport with full field-level diff.
+        RunReconcileReport with full field-level diff and row-level side-by-side data.
 
     Example:
         from reconpilot import load_mapping, connect_dsn, reconcile_from_mapping
 
-        doc = load_mapping("mapping/CRM_Field_Mapping.csv")
+        doc = load_mapping("mapping/Supplier_Mapping.csv")
         src = connect_dsn("postgresql://user:pass@source/crm", name="CRM")
         tgt = connect_dsn("postgresql://user:pass@target/dw",  name="DW")
 
         result = reconcile_from_mapping(
             doc, src, tgt,
-            source_table="CUSTOMER",
+            source_table="SUPPLIER_MASTER",
             direction="INBOUND",
-            pipeline_name="CRM_Customer_Load",
+            pipeline_name="Supplier_Master_Load",
             run_filter="load_date = CURRENT_DATE",
         )
         result.print()
@@ -253,10 +329,8 @@ def reconcile_from_mapping(
     tgt_key_col   = tgt_keys[0]
 
     # run_filter is scoped to the source table columns.
-    # For INBOUND: filter the source side (CRM/Oracle) by batch marker.
-    # For OUTBOUND: filter the target side (DW) by batch marker — connections swap below.
     src_where = f" WHERE {run_filter}" if run_filter else ""
-    tgt_where = ""   # target filter only if caller needs it (use run_filter on src side)
+    tgt_where = ""
 
     src_sql = f"SELECT {src_cols_sql} FROM {source_table}{src_where}"
     tgt_sql = f"SELECT {tgt_cols_sql} FROM {target_table}{tgt_where}"
@@ -268,13 +342,8 @@ def reconcile_from_mapping(
         f"SELECT COUNT(*) FROM {target_table}{tgt_where};",
     ]
 
-    # For OUTBOUND: target is the authoritative side that pushes data back to source.
-    # Swap which connection is queried with which SQL so each DB gets its own column names.
-    # After swapping, src_rows will contain target-table data, tgt_rows will contain source-table data.
+    # For OUTBOUND: swap BOTH connections and SQL so each DB gets queries with its own column names.
     if direction.upper() == "OUTBOUND":
-        # Swap BOTH connections and SQL so each DB receives queries with its own column names.
-        # After swap: source_conn (now old target) queries tgt_sql (target columns) ✓
-        #             target_conn (now old source) queries src_sql (source columns) ✓
         source_conn, target_conn = target_conn, source_conn
         src_sql, tgt_sql = tgt_sql, src_sql
         src_key_col, tgt_key_col = tgt_key_col, src_key_col
@@ -313,8 +382,36 @@ def reconcile_from_mapping(
     extra_in_target   = sorted(tgt_keys_set - src_keys_set)
     matched_keys      = src_keys_set & tgt_keys_set
 
+    # Build row-level diffs for missing and extra rows
+    row_diffs: list[RowDiff] = []
+
+    for key in missing_in_target:
+        row_diffs.append(RowDiff(
+            key=key,
+            status="missing_in_target",
+            source_row=dict(src_index[key]),
+            target_row={},
+            mismatched_fields=[],
+            comment=f"Row with key={key} exists in source but is MISSING in target. "
+                    f"Pipeline may have dropped this record.",
+        ))
+
+    for key in extra_in_target:
+        row_diffs.append(RowDiff(
+            key=key,
+            status="extra_in_target",
+            source_row={},
+            target_row=dict(tgt_index[key]),
+            mismatched_fields=[],
+            comment=f"Row with key={key} exists in target but NOT in source. "
+                    f"Possible double-load or orphaned record.",
+        ))
+
     # Field-level reconciliation
     field_results = []
+    # Track per-key which fields mismatched (for row_diffs)
+    key_field_issues: dict[str, list[str]] = {}
+
     for m in mappings:
         if m.is_key:
             continue
@@ -328,8 +425,8 @@ def reconcile_from_mapping(
         for key in matched_keys:
             sr = src_index[key]
             tr = tgt_index[key]
-            sv = sr.get(m.source_column) or sr.get(src_c)
-            tv = tr.get(m.target_column) or tr.get(tgt_c)
+            sv = sr.get(m.source_column) if sr.get(m.source_column) is not None else sr.get(src_c)
+            tv = tr.get(m.target_column) if tr.get(m.target_column) is not None else tr.get(tgt_c)
 
             if sv is None:
                 null_src += 1
@@ -346,6 +443,13 @@ def reconcile_from_mapping(
                 mismatched += 1
                 if len(sample_diffs) < 5:
                     sample_diffs.append({"key": key, "source": sv, "target": tv})
+                # Track for row_diffs
+                if key not in key_field_issues:
+                    key_field_issues[key] = []
+                key_field_issues[key].append(
+                    f"{m.source_column}→{m.target_column} "
+                    f"[{_build_field_comment(sv, tv, m.transformation)}]"
+                )
 
         field_results.append(FieldResult(
             source_column=m.source_column,
@@ -361,6 +465,22 @@ def reconcile_from_mapping(
         if mismatched > 0 and not m.nullable and null_tgt > 0:
             warnings.append(f"Field {m.target_column}: NOT NULL in mapping but {null_tgt} nulls in target")
 
+    # Build row_diffs for matched keys that had field mismatches
+    for key, issues in key_field_issues.items():
+        comment = "; ".join(issues)
+        row_diffs.append(RowDiff(
+            key=key,
+            status="mismatch",
+            source_row=dict(src_index[key]),
+            target_row=dict(tgt_index[key]),
+            mismatched_fields=[iss.split("→")[0].split("[")[0].strip() for iss in issues],
+            comment=comment,
+        ))
+
+    # Sort row_diffs: missing first, then extra, then mismatches
+    status_order = {"missing_in_target": 0, "extra_in_target": 1, "mismatch": 2}
+    row_diffs.sort(key=lambda d: (status_order.get(d.status, 9), d.key))
+
     return RunReconcileReport(
         pipeline_name=name,
         direction=direction.upper(),
@@ -374,6 +494,7 @@ def reconcile_from_mapping(
         missing_in_target=missing_in_target,
         extra_in_target=extra_in_target,
         field_results=field_results,
+        row_diffs=row_diffs,
         warnings=warnings,
         generated_sql=generated_sql,
     )
